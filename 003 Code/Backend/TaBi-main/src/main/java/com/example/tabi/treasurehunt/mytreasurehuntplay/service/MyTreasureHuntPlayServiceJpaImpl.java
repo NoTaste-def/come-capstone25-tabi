@@ -1,0 +1,237 @@
+package com.example.tabi.treasurehunt.mytreasurehuntplay.service;
+
+import com.example.tabi.appuser.entity.AppUser;
+import com.example.tabi.appuser.repository.AppUserRepository;
+import com.example.tabi.appuser.service.AppUserServiceJpaImpl;
+import com.example.tabi.member.repository.MemberRepository;
+import com.example.tabi.reward.service.RewardService;
+import com.example.tabi.util.PostStatus;
+import com.example.tabi.treasurehunt.mytreasurehunt.entity.MyTreasureHunt;
+import com.example.tabi.treasurehunt.mytreasurehunt.repository.MyTreasureHuntRepository;
+import com.example.tabi.util.PlayStatus;
+import com.example.tabi.treasurehunt.mytreasurehuntplay.entity.MyTreasureHuntPlay;
+import com.example.tabi.treasurehunt.mytreasurehuntplay.repository.MyTreasureHuntPlayRepository;
+import com.example.tabi.treasurehunt.mytreasurehuntplay.vo.MyTreasureHuntPlayDto;
+import com.example.tabi.treasurehunt.mytreasurehuntplay.vo.PositionRequest;
+import com.example.tabi.treasurehunt.treasurehuntpost.entity.TreasureHuntPost;
+import com.example.tabi.treasurehunt.treasurehuntpost.repository.TreasureHuntPostRepository;
+import com.example.tabi.util.GeoUtil;
+import jakarta.transaction.Transactional;
+import lombok.RequiredArgsConstructor;
+import org.springframework.security.core.Authentication;
+import org.springframework.stereotype.Service;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import java.util.stream.Collectors;
+
+@Service
+@RequiredArgsConstructor
+public class MyTreasureHuntPlayServiceJpaImpl implements MyTreasureHuntPlayService {
+    private static final double BASE_RADIUS_KM = 1.0;
+    private static final double SUCCESS_RADIUS_KM = 0.0015;
+    // 1.5m
+    private final AppUserRepository appUserRepository;
+    private final MemberRepository memberRepository;
+    private final MyTreasureHuntPlayRepository myTreasureHuntPlayRepository;
+    private final TreasureHuntPostRepository treasureHuntPostRepository;
+
+    private final RewardService rewardService;
+
+    @Override
+    @Transactional
+    public MyTreasureHuntPlayDto changeToSpecificStatusTreasureHuntPlay(Authentication authentication, PositionRequest positionRequest, PlayStatus playStatus) {
+        MyTreasureHuntPlayDto myTreasureHuntPlayDto = new MyTreasureHuntPlayDto();
+
+        Optional<AppUser> optionalAppUser = AppUserServiceJpaImpl.authenticationToAppUser(authentication, memberRepository, appUserRepository);
+
+        if (optionalAppUser.isEmpty()) {
+            myTreasureHuntPlayDto.setErrorMessage("AppUser Not Found");
+            return myTreasureHuntPlayDto;
+        }
+
+        AppUser appUser = optionalAppUser.get();
+
+        TreasureHuntPost treasureHuntPost = treasureHuntPostRepository.findById(positionRequest.getTreasureHuntPostId()).orElse(null);
+
+        if (treasureHuntPost == null) {
+            myTreasureHuntPlayDto.setErrorMessage("Already Deleted and Not Found"); // 삭제되거나 없는 포스트
+            return myTreasureHuntPlayDto;
+        }
+
+        if (treasureHuntPost.isTermination()) {
+            myTreasureHuntPlayDto.setErrorMessage("Already Terminated Treasure Hunt Posting");
+            return myTreasureHuntPlayDto;
+        }
+
+        MyTreasureHuntPlay myTreasureHuntPlay;
+
+        switch (playStatus) {
+            case AVAILABLE:
+                if (!GeoUtil.isWithinRadius(treasureHuntPost.getTreasureHuntStartLocation().getLatitude(), treasureHuntPost.getTreasureHuntStartLocation().getLongitude(), positionRequest.getLatitude(),  positionRequest.getLongitude(), BASE_RADIUS_KM)) {
+                    myTreasureHuntPlayDto.setErrorMessage("Current Position isn't within Radius of Treasure Hunt Posting (1km)");
+                    return myTreasureHuntPlayDto;
+                }
+
+                myTreasureHuntPlay = new MyTreasureHuntPlay();
+                myTreasureHuntPlay.setAppUser(appUser);
+                myTreasureHuntPlay.setTreasureHuntPost(treasureHuntPost);
+                myTreasureHuntPlay.setPlayStatus(PlayStatus.AVAILABLE);
+                myTreasureHuntPlayRepository.save(myTreasureHuntPlay);
+
+                return myTreasureHuntPlayToMyTreasureHuntPlayDto(myTreasureHuntPlay);
+
+            case PENDING:
+                myTreasureHuntPlay = myTreasureHuntPlayRepository.findByAppUserAndTreasureHuntPost(appUser, treasureHuntPost);
+
+                if (myTreasureHuntPlay.getPlayStatus() != PlayStatus.PLAYING) {
+                    myTreasureHuntPlayDto.setErrorMessage("Pending is not possible because it is not in the playing state");
+                    return myTreasureHuntPlayDto;
+                }
+
+                myTreasureHuntPlay.setPlayStatus(PlayStatus.PENDING);
+                myTreasureHuntPlayRepository.save(myTreasureHuntPlay);
+
+                return myTreasureHuntPlayToMyTreasureHuntPlayDto(myTreasureHuntPlay);
+
+            case PLAYING:
+                myTreasureHuntPlay = myTreasureHuntPlayRepository.findByAppUserAndTreasureHuntPost(appUser, treasureHuntPost);
+
+                if (myTreasureHuntPlay.getPlayStatus() != PlayStatus.PENDING && myTreasureHuntPlay.getPlayStatus() != PlayStatus.AVAILABLE) {
+                    myTreasureHuntPlayDto.setErrorMessage("Playing state is not possible because it is not in the available state or the pending state");
+                    return myTreasureHuntPlayDto;
+                }
+
+                myTreasureHuntPlay.setPlayStatus(PlayStatus.PLAYING);
+                myTreasureHuntPlayRepository.save(myTreasureHuntPlay);
+
+                return myTreasureHuntPlayToMyTreasureHuntPlayDto(myTreasureHuntPlay);
+
+            case CLEARED:
+                if (!GeoUtil.isWithinRadius(treasureHuntPost.getTreasureHuntStartLocation().getLatitude(), treasureHuntPost.getTreasureHuntStartLocation().getLongitude(), positionRequest.getLatitude(),  positionRequest.getLongitude(), SUCCESS_RADIUS_KM)) {
+                    myTreasureHuntPlayDto.setErrorMessage("Current Position isn't within Radius of Treasure Hunt Posting (1.5m)");
+                    return myTreasureHuntPlayDto;
+                }
+
+                List<MyTreasureHunt> myTreasureHunts = treasureHuntPost.getMyTreasureHunts();
+
+                for (MyTreasureHunt myTreasureHunt : myTreasureHunts) {
+                    if (myTreasureHunt.getStatus() != PostStatus.CREATED)
+                        myTreasureHunt.setStatus(PostStatus.TERMINATED);
+                }
+
+                myTreasureHuntPlay = myTreasureHuntPlayRepository.findByAppUserAndTreasureHuntPost(appUser, treasureHuntPost);
+
+                if (myTreasureHuntPlay.getPlayStatus() != PlayStatus.PLAYING) {
+                    myTreasureHuntPlayDto.setErrorMessage("You are not in the playing state");
+                    return myTreasureHuntPlayDto;
+                }
+
+                treasureHuntPost.setTermination(true);
+                treasureHuntPostRepository.save(treasureHuntPost);
+                treasureHuntPostRepository.flush();
+
+                myTreasureHuntPlay.setPlayStatus(PlayStatus.CLEARED);
+                myTreasureHuntPlayRepository.save(myTreasureHuntPlay);
+
+                rewardService.addReward(appUser, treasureHuntPost.getReward());
+
+                return myTreasureHuntPlayToMyTreasureHuntPlayDto(myTreasureHuntPlay);
+
+            default:
+                myTreasureHuntPlayDto.setErrorMessage("Wrong Status Setting (Sever Error)");
+                return myTreasureHuntPlayDto;
+        }
+    }
+
+    @Override
+    public List<MyTreasureHuntPlayDto> getSpecificStatusTreasureHuntPlays(Authentication authentication, PlayStatus playStatus) {
+        Optional<AppUser> optionalAppUser = AppUserServiceJpaImpl.authenticationToAppUser(authentication, memberRepository, appUserRepository);
+
+        if (optionalAppUser.isEmpty())
+            return null;
+
+        AppUser appUser = optionalAppUser.get();
+
+        List<MyTreasureHuntPlay> myTreasureHuntPlays;
+        List<MyTreasureHuntPlay> excludeTerminatedTreasureHuntPost = new ArrayList<>();
+
+        switch (playStatus) {
+            case AVAILABLE:
+                myTreasureHuntPlays = myTreasureHuntPlayRepository.findByAppUserAndPlayStatus(appUser, PlayStatus.AVAILABLE);
+
+                for (MyTreasureHuntPlay myTreasureHuntPlay : myTreasureHuntPlays) {
+                    if (!myTreasureHuntPlay.getTreasureHuntPost().isTermination()) {
+                        excludeTerminatedTreasureHuntPost.add(myTreasureHuntPlay);
+                    }
+                }
+
+                return excludeTerminatedTreasureHuntPost.stream().map(MyTreasureHuntPlayServiceJpaImpl::myTreasureHuntPlayToMyTreasureHuntPlayDto).collect(Collectors.toList());
+
+            case PENDING:
+                myTreasureHuntPlays = myTreasureHuntPlayRepository.findByAppUserAndPlayStatus(appUser, PlayStatus.PENDING);
+
+                for (MyTreasureHuntPlay myTreasureHuntPlay : myTreasureHuntPlays) {
+                    if (!myTreasureHuntPlay.getTreasureHuntPost().isTermination()) {
+                        excludeTerminatedTreasureHuntPost.add(myTreasureHuntPlay);
+                    }
+                }
+
+                return excludeTerminatedTreasureHuntPost.stream().map(MyTreasureHuntPlayServiceJpaImpl::myTreasureHuntPlayToMyTreasureHuntPlayDto).collect(Collectors.toList());
+
+            case PLAYING:
+                myTreasureHuntPlays = myTreasureHuntPlayRepository.findByAppUserAndPlayStatus(appUser, PlayStatus.PLAYING);
+
+                for (MyTreasureHuntPlay myTreasureHuntPlay : myTreasureHuntPlays) {
+                    if (!myTreasureHuntPlay.getTreasureHuntPost().isTermination()) {
+                        excludeTerminatedTreasureHuntPost.add(myTreasureHuntPlay);
+                    }
+                }
+
+                return excludeTerminatedTreasureHuntPost.stream().map(MyTreasureHuntPlayServiceJpaImpl::myTreasureHuntPlayToMyTreasureHuntPlayDto).collect(Collectors.toList());
+
+            case CLEARED:
+                myTreasureHuntPlays = myTreasureHuntPlayRepository.findByAppUserAndPlayStatus(appUser, PlayStatus.CLEARED);
+                return myTreasureHuntPlays.stream().map(MyTreasureHuntPlayServiceJpaImpl::myTreasureHuntPlayToMyTreasureHuntPlayDto).collect(Collectors.toList());
+
+            default:
+                return null;
+        }
+    }
+
+    @Override
+    @Transactional
+    public Boolean deleteAvailableMyTreasureHuntPlay(Authentication authentication, Long id) {
+        Optional<AppUser> optionalAppUser = AppUserServiceJpaImpl.authenticationToAppUser(authentication, memberRepository, appUserRepository);
+
+        if (optionalAppUser.isEmpty())
+            return false;
+
+        Optional<MyTreasureHuntPlay> myTreasureHuntPlayOptional = myTreasureHuntPlayRepository.findById(id);
+
+        if (myTreasureHuntPlayOptional.isEmpty())
+            return false;
+
+        MyTreasureHuntPlay myTreasureHuntPlay = myTreasureHuntPlayOptional.get();
+
+        if (!myTreasureHuntPlay.getPlayStatus().equals(PlayStatus.AVAILABLE))
+            return false;
+
+        myTreasureHuntPlayRepository.delete(myTreasureHuntPlay);
+
+        return true;
+    }
+
+    public static MyTreasureHuntPlayDto myTreasureHuntPlayToMyTreasureHuntPlayDto(MyTreasureHuntPlay play) {
+        return new MyTreasureHuntPlayDto(
+            play.getMyTreasureHuntPlayId(),
+            play.getAppUser().getAppUserId(),
+            play.getTreasureHuntPost().getTreasureHuntPostId(),
+            play.getPlayStatus(),
+            play.getCreatedAt(),
+            play.getUpdatedAt(),
+            null
+        );
+    }
+}
