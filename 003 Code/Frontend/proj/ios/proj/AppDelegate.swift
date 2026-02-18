@@ -35,7 +35,7 @@ class AppDelegate: RCTAppDelegate {
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey : Any]? = nil
   ) -> Bool {
-    GMSServices.provideAPIKey("AIzaSyDV3d2I26rVwDBCKVdNsWrJTYmnYLev6mM")
+    GMSServices.provideAPIKey("Input API here")
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
 }
